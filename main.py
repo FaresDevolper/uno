@@ -9,7 +9,7 @@ from functools import lru_cache
 import discord
 from aiohttp import web
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("uno")
@@ -22,6 +22,7 @@ MAX_TIMEOUTS = 2
 LOBBY_SECONDS = 300
 MIN_PLAYERS = 2
 MAX_PLAYERS = 10
+KEEP_EVENT_HISTORY = False  # False: only the latest action message stays under the table
 START_CARDS = 7
 
 
@@ -340,6 +341,221 @@ def prerender():
 
 
 # ======================================================================
+# Table rendering (one image, edited in place every move)
+# ======================================================================
+TS = 2  # supersampling for the table
+CW, CH = 1200, 760
+AV_D = 104 * TS
+SEAT_AX, SEAT_AY = 480, 278
+PALETTE = [
+    (237, 28, 36), (0, 114, 188), (0, 166, 81), (255, 160, 0), (142, 68, 173),
+    (0, 150, 150), (210, 70, 130), (90, 90, 100), (180, 100, 40), (60, 60, 200),
+]
+GOLD = (255, 214, 0, 255)
+
+_back_cache = {}
+_fallback_cache = {}
+
+
+def _darken(c, f):
+    return tuple(int(x * f) for x in c)
+
+
+def _uno_word(d, xy, size, fill):
+    font = get_font(size)
+    d.text(xy, "UNO", font=font, fill=fill, anchor="mm",
+           stroke_width=max(2, size // 11), stroke_fill=(0, 0, 0, 255))
+
+
+def _render_back_full():
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img, "RGBA")
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=32 * S, fill=WHITE)
+    m = 15 * S
+    d.rounded_rectangle((m, m, W - 1 - m, H - 1 - m), radius=22 * S, fill=BLACK)
+    cx, cy = W // 2, H // 2
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(layer, "RGBA").ellipse((cx - 84 * S, cy - 140 * S, cx + 84 * S, cy + 140 * S), fill=RGBA["red"])
+    layer = layer.rotate(-25, resample=Image.Resampling.BICUBIC)
+    img = Image.alpha_composite(img, layer)
+    tl = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    _uno_word(ImageDraw.Draw(tl, "RGBA"), (cx, cy), 74 * S, RGBA["yellow"])
+    tl = tl.rotate(25, resample=Image.Resampling.BICUBIC)
+    return Image.alpha_composite(img, tl)
+
+
+def get_back(size):
+    if size not in _back_cache:
+        _back_cache[size] = _render_back_full().resize(size, Image.Resampling.LANCZOS)
+    return _back_cache[size]
+
+
+def make_circle(img, diameter):
+    img = img.convert("RGBA").resize((diameter, diameter), Image.Resampling.LANCZOS)
+    big = diameter * 4
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, big - 1, big - 1), fill=255)
+    mask = mask.resize((diameter, diameter), Image.Resampling.LANCZOS)
+    out = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
+    out.paste(img, (0, 0), mask)
+    return out
+
+
+def fallback_avatar(index):
+    if index not in _fallback_cache:
+        img = Image.new("RGBA", (AV_D, AV_D), PALETTE[index % len(PALETTE)] + (255,))
+        d = ImageDraw.Draw(img, "RGBA")
+        d.text((AV_D // 2, AV_D // 2), str(index + 1), font=get_font(AV_D // 2), fill=WHITE, anchor="mm")
+        _fallback_cache[index] = make_circle(img, AV_D)
+    return _fallback_cache[index]
+
+
+def _paste_center(img, im, center, angle=0):
+    r = im.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True) if angle else im
+    x, y = int(center[0] - r.width / 2), int(center[1] - r.height / 2)
+    pad = 24 * TS
+    sh = Image.new("RGBA", (r.width + 2 * pad, r.height + 2 * pad), (0, 0, 0, 0))
+    black = Image.new("RGBA", r.size, (0, 0, 0, 255))
+    black.putalpha(r.getchannel("A").point(lambda v: int(v * 0.5)))
+    sh.paste(black, (pad, pad))
+    sh = sh.filter(ImageFilter.GaussianBlur(8 * TS))
+    img.paste(sh, (x - pad + 6 * TS, y - pad + 10 * TS), sh)
+    img.paste(r, (x, y), r)
+
+
+def _pill(d, center, text, fill, fg, size, width, height, outline=WHITE):
+    x, y = center
+    d.rounded_rectangle((x - width / 2, y - height / 2, x + width / 2, y + height / 2),
+                        radius=height / 2, fill=fill, outline=outline, width=3 * TS)
+    d.text((x, y), text, font=get_font(size), fill=fg, anchor="mm")
+
+
+def render_table(snap):
+    s = TS
+    w, h = CW * s, CH * s
+    cx, cy = w // 2, h // 2
+    color = snap["color"]
+    base = RGB[color]
+    img = Image.new("RGBA", (w, h), (12, 12, 16, 255))
+    d = ImageDraw.Draw(img, "RGBA")
+
+    # table: white edge, Uno colored rim, felt in the current color
+    tb = (cx - 540 * s, cy - 320 * s, cx + 540 * s, cy + 320 * s)
+    d.ellipse(tb, fill=WHITE)
+    rim = (tb[0] + 8 * s, tb[1] + 8 * s, tb[2] - 8 * s, tb[3] - 8 * s)
+    d.pieslice(rim, 180, 270, fill=RGBA["red"])
+    d.pieslice(rim, 270, 360, fill=RGBA["blue"])
+    d.pieslice(rim, 0, 90, fill=RGBA["green"])
+    d.pieslice(rim, 90, 180, fill=RGBA["yellow"])
+    fb = (rim[0] + 18 * s, rim[1] + 18 * s, rim[2] - 18 * s, rim[3] - 18 * s)
+    d.ellipse(fb, fill=_darken(base, 0.55) + (255,))
+    fw, fh = fb[2] - fb[0], fb[3] - fb[1]
+    grad = Image.radial_gradient("L").resize((fw, fh), Image.Resampling.BILINEAR)
+    emask = Image.new("L", (fw, fh), 0)
+    ImageDraw.Draw(emask).ellipse((0, 0, fw - 1, fh - 1), fill=255)
+    shade_mask = ImageChops.multiply(grad.point(lambda v: int(v * 0.6)), emask)
+    img.paste(Image.new("RGBA", (fw, fh), (0, 0, 0, 255)), (fb[0], fb[1]), shade_mask)
+    d.ellipse((fb[0] + 14 * s, fb[1] + 14 * s, fb[2] - 14 * s, fb[3] - 14 * s),
+              outline=(255, 255, 255, 70), width=3 * s)
+
+    # direction arrows
+    a, b = 380 * s, 190 * s
+    for c in (45, 135, 225, 315):
+        t0, t1 = math.radians(c - 26), math.radians(c + 26)
+        ts = [t0 + (t1 - t0) * k / 24 for k in range(25)]
+        d.line([(cx + a * math.cos(t), cy + b * math.sin(t)) for t in ts],
+               fill=(255, 255, 255, 120), width=9 * s, joint="curve")
+        if snap["direction"] == 1:
+            t = t1
+            tx, ty = -a * math.sin(t), b * math.cos(t)
+        else:
+            t = t0
+            tx, ty = a * math.sin(t), -b * math.cos(t)
+        n = math.hypot(tx, ty)
+        tx, ty = tx / n, ty / n
+        px, py = cx + a * math.cos(t), cy + b * math.sin(t)
+        nx, ny = -ty, tx
+        d.polygon([(px + tx * 30 * s, py + ty * 30 * s),
+                   (px + nx * 20 * s, py + ny * 20 * s),
+                   (px - nx * 20 * s, py - ny * 20 * s)], fill=(255, 255, 255, 170))
+
+    # piles
+    cw_, ch_ = 170 * s, 255 * s
+    dpx, dcx = cx - 105 * s, cx + 105 * s
+
+    gw, gh = 460 * s, 500 * s
+    glow = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse((gw // 2 - 150 * s, gh // 2 - 170 * s, gw // 2 + 150 * s, gh // 2 + 170 * s),
+                                 fill=base + (170,))
+    glow = glow.filter(ImageFilter.GaussianBlur(28 * s))
+    img.alpha_composite(glow, (dcx - gw // 2, cy - gh // 2))
+
+    back = get_back((cw_, ch_))
+    for k in (3, 2, 1, 0):
+        _paste_center(img, back, (dpx - k * 3 * s, cy - k * 3 * s))
+
+    if snap["prev"] is not None:
+        prev = card_image(snap["prev"]).resize((cw_, ch_), Image.Resampling.LANCZOS)
+        _paste_center(img, prev, (dcx - 16 * s, cy + 6 * s), 11)
+    top = card_image(snap["top"], snap["wild_color"]).resize((cw_, ch_), Image.Resampling.LANCZOS)
+    _paste_center(img, top, (dcx, cy), -6)
+
+    d = ImageDraw.Draw(img, "RGBA")
+    _pill(d, (dpx, cy + 165 * s), str(snap["deck"]), (20, 20, 24, 235), WHITE, 26 * s, 96 * s, 40 * s)
+    fg = (20, 20, 24, 255) if color == "yellow" else WHITE
+    _pill(d, (dcx, cy + 165 * s), color.upper(), RGBA[color], fg, 24 * s, 130 * s, 40 * s)
+
+    # logo
+    lw, lh = 170 * s, 100 * s
+    lg = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(lg, "RGBA")
+    ld.ellipse((4 * s, 6 * s, lw - 4 * s, lh - 6 * s), fill=RGBA["yellow"], outline=WHITE, width=5 * s)
+    _uno_word(ld, (lw // 2, lh // 2), 46 * s, RGBA["red"])
+    lg = lg.rotate(12, resample=Image.Resampling.BICUBIC)
+    img.paste(lg, (24 * s, 20 * s), lg)
+
+    # seats
+    players = snap["players"]
+    n = len(players)
+    R = AV_D // 2
+    for i, p in enumerate(players):
+        th = math.radians(90 + 360 * i / n)
+        x = int(cx + SEAT_AX * s * math.cos(th))
+        y = int(cy + SEAT_AY * s * math.sin(th))
+        if p["current"]:
+            d.ellipse((x - R - 20 * s, y - R - 20 * s, x + R + 20 * s, y + R + 20 * s), fill=(255, 214, 0, 70))
+            d.ellipse((x - R - 9 * s, y - R - 9 * s, x + R + 9 * s, y + R + 9 * s), fill=GOLD)
+        elif p["winner"]:
+            d.ellipse((x - R - 20 * s, y - R - 20 * s, x + R + 20 * s, y + R + 20 * s), fill=(255, 214, 0, 90))
+            d.ellipse((x - R - 9 * s, y - R - 9 * s, x + R + 9 * s, y + R + 9 * s), fill=GOLD)
+        else:
+            d.ellipse((x - R - 5 * s, y - R - 5 * s, x + R + 5 * s, y + R + 5 * s), fill=(255, 255, 255, 235))
+        img.paste(p["avatar"], (x - R, y - R), p["avatar"])
+        if p["skipped"]:
+            kx, ky, kr = x + int(R * 0.72), y - int(R * 0.72), 24 * s
+            d.ellipse((kx - kr, ky - kr, kx + kr, ky + kr), fill=(220, 30, 30, 255), outline=WHITE, width=3 * s)
+            d.line((kx - kr * 0.6, ky - kr * 0.6, kx + kr * 0.6, ky + kr * 0.6), fill=WHITE, width=5 * s)
+        if p["winner"]:
+            cyc = y - R - 6 * s
+            d.polygon([(x - 30 * s, cyc), (x - 30 * s, cyc - 28 * s), (x - 15 * s, cyc - 14 * s),
+                       (x, cyc - 34 * s), (x + 15 * s, cyc - 14 * s), (x + 30 * s, cyc - 28 * s),
+                       (x + 30 * s, cyc)], fill=GOLD, outline=(0, 0, 0, 255))
+            _pill(d, (x, y + R - 2 * s), "WIN", GOLD, (20, 20, 24, 255), 24 * s, 84 * s, 36 * s)
+        elif p["count"] == 1:
+            _pill(d, (x, y + R - 2 * s), "UNO", RGBA["red"], WHITE, 24 * s, 84 * s, 36 * s)
+        else:
+            _pill(d, (x, y + R - 2 * s), str(p["count"]), (20, 20, 24, 240), WHITE, 26 * s, 72 * s, 36 * s)
+
+    return _to_png(img.resize((CW, CH), Image.Resampling.LANCZOS).convert("RGB"))
+
+
+def _to_png(im):
+    buf = io.BytesIO()
+    im.save(buf, format="PNG", compress_level=6)
+    return buf.getvalue()
+
+
+# ======================================================================
 # Game
 # ======================================================================
 games = {}
@@ -352,10 +568,20 @@ class Player:
         self.hand = []
         self.uno = False
         self.timeouts = 0
+        self.avatar = None
 
     @property
     def mention(self):
         return self.member.mention
+
+
+async def load_avatar(member, index):
+    try:
+        data = await member.display_avatar.replace(size=128, format="png").read()
+        return make_circle(Image.open(io.BytesIO(data)), AV_D)
+    except Exception:
+        log.warning("avatar load failed", exc_info=True)
+        return fallback_avatar(index)
 
 
 class UnoGame:
@@ -378,6 +604,7 @@ class UnoGame:
         self.table_msg = None
         self.lobby_msg = None
         self.lobby_view = None
+        self.event_msg = None
         self.lock = asyncio.Lock()
         self.timer = None
         self.turn_token = 0
@@ -495,43 +722,63 @@ class UnoGame:
         e.add_field(name=f"اللاعبون ({len(self.players)})", value=names or "-", inline=False)
         return e
 
-    def table_embed(self):
-        e = discord.Embed(title="أونو", color=discord.Color.from_rgb(*RGB[self.color]))
-        e.add_field(name="الورقة الحالية", value=card_name(self.top), inline=True)
-        e.add_field(name="اللون الحالي", value=COLOR_AR[self.color], inline=True)
-        e.add_field(
-            name="الاتجاه",
-            value="مع عقارب الساعة" if self.direction == 1 else "عكس عقارب الساعة",
-            inline=True,
-        )
-        rows = []
-        for i, p in enumerate(self.players):
-            marker = ">>" if i == self.turn else "-"
-            extra = "  (أونو)" if len(p.hand) == 1 else ""
-            rows.append(f"{marker} {p.mention} : {len(p.hand)} ورقة{extra}")
-        e.add_field(name="اللاعبون", value="\n".join(rows), inline=False)
-        e.set_image(url="attachment://top.png")
-        e.set_footer(text=f"مهلة كل دور: {TURN_SECONDS} ثانية")
-        return e
-
     # ---------- table ----------
-    async def post_table(self, lines):
-        if self.table_msg:
+    def snapshot(self, winner=None):
+        wild_color = self.color if self.top[1] in WILDS else None
+        prev = self.discard[-2] if len(self.discard) >= 2 else None
+        players = []
+        for i, p in enumerate(self.players):
+            players.append({
+                "avatar": p.avatar or fallback_avatar(i),
+                "count": len(p.hand),
+                "current": winner is None and i == self.turn,
+                "skipped": p.id in self.skip_marks,
+                "winner": winner is not None and p.id == winner.id,
+            })
+        return {
+            "color": self.color,
+            "top": self.top,
+            "wild_color": wild_color,
+            "prev": prev,
+            "direction": self.direction,
+            "deck": len(self.deck),
+            "players": players,
+        }
+
+    async def _update_table(self, png, view=None):
+        if self.table_msg is not None:
             try:
-                await self.table_msg.edit(view=None)
+                file = discord.File(io.BytesIO(png), filename="table.png")
+                await self.table_msg.edit(attachments=[file], view=view)
+                return
+            except discord.HTTPException:
+                log.warning("table edit failed, sending a new table message", exc_info=True)
+                self.table_msg = None
+        file = discord.File(io.BytesIO(png), filename="table.png")
+        kwargs = {"view": view} if view is not None else {}
+        self.table_msg = await self.channel.send(file=file, **kwargs)
+
+    async def _send_event(self, text, replace=True):
+        old = self.event_msg
+        self.event_msg = await self.channel.send(text)
+        if replace and old is not None and not KEEP_EVENT_HISTORY:
+            try:
+                await old.delete()
             except discord.HTTPException:
                 pass
+
+    async def post_table(self, lines):
         player = self.current()
-        content = "\n".join(lines + [f"الدور الآن على {player.mention}"])
-        wild_color = self.color if self.top[1] in WILDS else None
-        file = discord.File(io.BytesIO(card_png(self.top, wild_color)), filename="top.png")
-        self.table_msg = await self.channel.send(
-            content=content, embed=self.table_embed(), file=file, view=TableView(self)
-        )
+        png = await asyncio.to_thread(render_table, self.snapshot())
+        await self._update_table(png, TableView(self))
+        text = "\n".join(lines + [f"الدور الآن على {player.mention}"])
+        await self._send_event(text)
         self._arm_timer()
 
     async def begin(self):
         async with self.lock:
+            for i, p in enumerate(self.players):
+                p.avatar = await load_avatar(p.member, i)
             self.deck = build_deck()
             for p in self.players:
                 p.hand = [self.deck.pop() for _ in range(START_CARDS)]
@@ -555,18 +802,16 @@ class UnoGame:
         self._cancel_timer()
         if games.get(self.channel.id) is self:
             games.pop(self.channel.id, None)
-        if self.table_msg:
-            try:
-                await self.table_msg.edit(view=None)
-            except discord.HTTPException:
-                pass
-        e = discord.Embed(title="انتهت اللعبة", color=discord.Color.gold())
-        e.description = f"الفائز: {winner.mention}"
-        left = [f"{p.mention} : {len(p.hand)} ورقة" for p in self.players if p.id != winner.id]
+        try:
+            png = await asyncio.to_thread(render_table, self.snapshot(winner))
+            await self._update_table(png, None)
+        except Exception:
+            log.exception("final table failed")
+        parts = ["@here"] + lines + [f"الفائز في لعبة أونو هو {winner.mention}. مبروك!"]
+        left = [f"{p.member.display_name} : {len(p.hand)} ورقة" for p in self.players if p.id != winner.id]
         if left:
-            e.add_field(name="الأوراق المتبقية", value="\n".join(left), inline=False)
-        content = "@here\n" + "\n".join(lines + [f"الفائز في لعبة أونو هو {winner.mention}. مبروك!"])
-        await self.channel.send(content=content, embed=e)
+            parts.append("الأوراق المتبقية:\n" + "\n".join(left))
+        await self._send_event("\n".join(parts), replace=False)
 
     async def force_end(self, by):
         async with self.lock:
