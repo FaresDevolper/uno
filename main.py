@@ -34,9 +34,9 @@ def _parse_ids(raw):
 # Who is allowed to stop a game (nobody else can).
 # Put role IDs here, separated by commas, or set STOP_ROLE_IDS in Render.
 # Example: "123456789012345678,987654321098765432"
-STOP_ROLE_IDS = _parse_ids("" + "," + os.getenv("STOP_ROLE_IDS", ""))
+STOP_ROLE_IDS = _parse_ids("" + "," + os.getenv("STOP_ROLE_IDS", "1551149519675072612"))
 # Optional: user IDs that can also stop a game (env STOP_USER_IDS).
-STOP_USER_IDS = _parse_ids("" + "," + os.getenv("STOP_USER_IDS", ""))
+STOP_USER_IDS = _parse_ids("" + "," + os.getenv("STOP_USER_IDS", "912349519990095892"))
 
 
 def can_stop(member):
