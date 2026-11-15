@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import math
 import os
@@ -33,9 +34,9 @@ def _parse_ids(raw):
 # Who is allowed to stop a game (nobody else can).
 # Put role IDs here, separated by commas, or set STOP_ROLE_IDS in Render.
 # Example: "123456789012345678,987654321098765432"
-STOP_ROLE_IDS = _parse_ids("" + "," + os.getenv("STOP_ROLE_IDS", "1551149519675072612"))
+STOP_ROLE_IDS = _parse_ids("" + "," + os.getenv("STOP_ROLE_IDS", ""))
 # Optional: user IDs that can also stop a game (env STOP_USER_IDS).
-STOP_USER_IDS = _parse_ids("" + "," + os.getenv("STOP_USER_IDS", "912349519990095892"))
+STOP_USER_IDS = _parse_ids("" + "," + os.getenv("STOP_USER_IDS", ""))
 
 
 def can_stop(member):
@@ -137,13 +138,13 @@ def get_font(size):
         return ImageFont.load_default()
 
 
-def _text(d, xy, text, size, fill, shadow=False):
+def _text(d, xy, text, size, fill, shadow=False, shadow_fill=(170, 170, 170, 255)):
     font = get_font(size)
     stroke = max(1, size // 34)
     if shadow:
         off = max(2, size // 30)
-        d.text((xy[0] + off, xy[1] + off), text, font=font, fill=(0, 0, 0, 80),
-               anchor="mm", stroke_width=stroke, stroke_fill=(0, 0, 0, 80))
+        d.text((xy[0] + off, xy[1] + off), text, font=font, fill=shadow_fill,
+               anchor="mm", stroke_width=stroke, stroke_fill=shadow_fill)
     d.text(xy, text, font=font, fill=fill, anchor="mm", stroke_width=stroke, stroke_fill=fill)
 
 
@@ -266,7 +267,8 @@ def _render(color, value, wild_color=None):
         _draw_draw2(d, cx, cy, 78 * S, RGBA[color])
     elif value == "wild4":
         if chosen:
-            _text(d, (cx, cy), "+4", 110 * S, WHITE, shadow=True)
+            _text(d, (cx, cy), "+4", 110 * S, WHITE, shadow=True,
+                  shadow_fill=tuple(int(v * 0.6) for v in RGB[wild_color]) + (255,))
         else:
             _draw_four_cards(d, cx, cy, 70 * S)
 
@@ -403,10 +405,7 @@ def make_circle(img, diameter):
 
 def fallback_avatar(index):
     if index not in _fallback_cache:
-        img = Image.new("RGBA", (AV_D, AV_D), PALETTE[index % len(PALETTE)] + (255,))
-        d = ImageDraw.Draw(img, "RGBA")
-        d.text((AV_D // 2, AV_D // 2), str(index + 1), font=get_font(AV_D // 2), fill=WHITE, anchor="mm")
-        _fallback_cache[index] = make_circle(img, AV_D)
+        _fallback_cache[index] = make_circle(_fallback_src(index), AV_D)
     return _fallback_cache[index]
 
 
@@ -436,7 +435,7 @@ def render_table(snap):
     cx, cy = w // 2, h // 2
     color = snap["color"]
     base = RGB[color]
-    img = Image.new("RGBA", (w, h), (12, 12, 16, 255))
+    img = Image.new("RGB", (w, h), (12, 12, 16))
     d = ImageDraw.Draw(img, "RGBA")
 
     # table: white edge, Uno colored rim, felt in the current color
@@ -464,7 +463,7 @@ def render_table(snap):
         t0, t1 = math.radians(c - 26), math.radians(c + 26)
         ts = [t0 + (t1 - t0) * k / 24 for k in range(25)]
         d.line([(cx + a * math.cos(t), cy + b * math.sin(t)) for t in ts],
-               fill=(255, 255, 255, 120), width=9 * s, joint="curve")
+               fill=(225, 225, 225, 255), width=9 * s, joint="curve")
         if snap["direction"] == 1:
             t = t1
             tx, ty = -a * math.sin(t), b * math.cos(t)
@@ -477,7 +476,7 @@ def render_table(snap):
         nx, ny = -ty, tx
         d.polygon([(px + tx * 30 * s, py + ty * 30 * s),
                    (px + nx * 20 * s, py + ny * 20 * s),
-                   (px - nx * 20 * s, py - ny * 20 * s)], fill=(255, 255, 255, 170))
+                   (px - nx * 20 * s, py - ny * 20 * s)], fill=(225, 225, 225, 255))
 
     # piles
     cw_, ch_ = 170 * s, 255 * s
@@ -488,7 +487,7 @@ def render_table(snap):
     ImageDraw.Draw(glow).ellipse((gw // 2 - 150 * s, gh // 2 - 170 * s, gw // 2 + 150 * s, gh // 2 + 170 * s),
                                  fill=base + (170,))
     glow = glow.filter(ImageFilter.GaussianBlur(28 * s))
-    img.alpha_composite(glow, (dcx - gw // 2, cy - gh // 2))
+    img.paste(glow, (dcx - gw // 2, cy - gh // 2), glow)
 
     back = get_back((cw_, ch_))
     for k in (3, 2, 1, 0):
@@ -556,6 +555,241 @@ def _to_png(im):
 
 
 # ======================================================================
+# Lobby image, winner image and win statistics
+# ======================================================================
+def _fallback_src(index):
+    img = Image.new("RGBA", (256, 256), PALETTE[index % len(PALETTE)] + (255,))
+    ImageDraw.Draw(img, "RGBA").text((128, 128), str(index + 1), font=get_font(128), fill=WHITE, anchor="mm")
+    return img
+
+
+def _crown(d, x, base_y, width):
+    hw = width / 2
+    hgt = width * 0.55
+    d.polygon([
+        (x - hw, base_y), (x - hw, base_y - hgt * 0.8), (x - hw * 0.5, base_y - hgt * 0.45),
+        (x, base_y - hgt), (x + hw * 0.5, base_y - hgt * 0.45), (x + hw, base_y - hgt * 0.8),
+        (x + hw, base_y),
+    ], fill=GOLD, outline=(0, 0, 0, 255))
+
+
+def _paste_logo(img, cx, cy, width):
+    lw, lh = int(width), int(width * 0.59)
+    lg = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(lg, "RGBA")
+    ld.ellipse((lw * 0.02, lh * 0.06, lw * 0.98, lh * 0.94), fill=RGBA["yellow"],
+               outline=WHITE, width=max(2, int(lw * 0.03)))
+    _uno_word(ld, (lw // 2, lh // 2), int(lw * 0.27), RGBA["red"])
+    lg = lg.rotate(12, resample=Image.Resampling.BICUBIC, expand=True)
+    img.paste(lg, (int(cx - lg.width / 2), int(cy - lg.height / 2)), lg)
+
+
+def _draw_table_base(img, d, cx, cy, rx, ry, felt):
+    s = TS
+    tb = (cx - rx, cy - ry, cx + rx, cy + ry)
+    d.ellipse(tb, fill=WHITE)
+    rim = (tb[0] + 8 * s, tb[1] + 8 * s, tb[2] - 8 * s, tb[3] - 8 * s)
+    d.pieslice(rim, 180, 270, fill=RGBA["red"])
+    d.pieslice(rim, 270, 360, fill=RGBA["blue"])
+    d.pieslice(rim, 0, 90, fill=RGBA["green"])
+    d.pieslice(rim, 90, 180, fill=RGBA["yellow"])
+    fb = (rim[0] + 18 * s, rim[1] + 18 * s, rim[2] - 18 * s, rim[3] - 18 * s)
+    d.ellipse(fb, fill=tuple(felt) + (255,))
+    fw, fh = fb[2] - fb[0], fb[3] - fb[1]
+    grad = Image.radial_gradient("L").resize((fw, fh), Image.Resampling.BILINEAR)
+    emask = Image.new("L", (fw, fh), 0)
+    ImageDraw.Draw(emask).ellipse((0, 0, fw - 1, fh - 1), fill=255)
+    shade_mask = ImageChops.multiply(grad.point(lambda v: int(v * 0.6)), emask)
+    img.paste(Image.new("RGBA", (fw, fh), (0, 0, 0, 255)), (fb[0], fb[1]), shade_mask)
+    d.ellipse((fb[0] + 14 * s, fb[1] + 14 * s, fb[2] - 14 * s, fb[3] - 14 * s),
+              outline=(255, 255, 255, 70), width=3 * s)
+
+
+def render_lobby(snap):
+    s = TS
+    LW, LH = 1200, 700
+    w, h = LW * s, LH * s
+    cx, cy = w // 2, 380 * s
+    img = Image.new("RGB", (w, h), (12, 12, 16))
+    d = ImageDraw.Draw(img, "RGBA")
+    _draw_table_base(img, d, cx, cy, 560 * s, 300 * s, (96, 14, 20))
+
+    cw_, ch_ = 120 * s, 180 * s
+    back = get_back((cw_, ch_))
+    deco = [
+        ((100, 150), ("red", "7"), -12, 14),
+        ((1100, 150), ("blue", "draw2"), 12, -14),
+        ((100, 570), ("green", "skip"), 10, -12),
+        ((1100, 570), ("yellow", "reverse"), -10, 12),
+    ]
+    for (x, y), card, ang, back_ang in deco:
+        _paste_center(img, back, (x * s - 14 * s, y * s + 6 * s), back_ang)
+        _paste_center(img, card_image(card).resize((cw_, ch_), Image.Resampling.LANCZOS), (x * s, y * s), ang)
+
+    d = ImageDraw.Draw(img, "RGBA")
+    _paste_logo(img, cx, 112 * s, 300 * s)
+
+    srcs = snap["srcs"]
+    D = 120 * s
+    R = D // 2
+    for k in range(snap["max"]):
+        row, col = divmod(k, 5)
+        x = cx + (col - 2) * 170 * s
+        y = (330 + row * 160) * s
+        if k < len(srcs):
+            ring = GOLD if k == 0 else WHITE
+            d.ellipse((x - R - 6 * s, y - R - 6 * s, x + R + 6 * s, y + R + 6 * s), fill=ring)
+            av = make_circle(srcs[k], D)
+            img.paste(av, (x - R, y - R), av)
+            if k == 0:
+                _crown(d, x, y - R - 6 * s, 64 * s)
+        else:
+            d.ellipse((x - R, y - R, x + R, y + R), fill=(255, 255, 255, 22),
+                      outline=(255, 255, 255, 90), width=3 * s)
+            arm = 22 * s
+            d.line((x - arm, y, x + arm, y), fill=(255, 255, 255, 110), width=6 * s)
+            d.line((x, y - arm, x, y + arm), fill=(255, 255, 255, 110), width=6 * s)
+
+    n = len(srcs)
+    _pill(d, (cx, 232 * s), f"{n} / {snap['max']}", (20, 20, 24, 240), WHITE, 40 * s, 200 * s, 58 * s)
+    dark = (20, 20, 24, 255)
+    if snap["state"] == "starting":
+        label, fill, fg = "STARTING", GOLD, dark
+    elif n >= snap["min"]:
+        label, fill, fg = "READY", RGBA["green"], WHITE
+    else:
+        label, fill, fg = "WAITING", RGBA["yellow"], dark
+    _pill(d, (cx, 628 * s), label, fill, fg, 34 * s, 250 * s, 54 * s)
+    return _to_png(img.resize((LW, LH), Image.Resampling.LANCZOS).convert("RGB"))
+
+
+def render_win(snap):
+    s = TS
+    WW, WH = 1200, 760
+    w, h = WW * s, WH * s
+    cx = w // 2
+    img = Image.new("RGB", (w, h), (10, 10, 14))
+
+    gw, gh = 1100 * s, 760 * s
+    glow = Image.new("RGBA", (gw, gh), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse((gw // 2 - 400 * s, 60 * s, gw // 2 + 400 * s, 600 * s), fill=(255, 190, 0, 120))
+    glow = glow.filter(ImageFilter.GaussianBlur(90 * s))
+    img.paste(glow, (cx - gw // 2, 0), glow)
+
+    rnd = random.Random(snap["seed"])
+    colors = [RGBA[k] for k in COLOR_KEYS] + [GOLD, WHITE]
+    for _ in range(150):
+        pw, ph = rnd.randint(10, 20) * s, rnd.randint(18, 34) * s
+        piece = Image.new("RGBA", (pw, ph), rnd.choice(colors))
+        piece = piece.rotate(rnd.randint(0, 359), expand=True)
+        px, py = rnd.randint(0, w), rnd.randint(0, h)
+        if abs(px - cx) < 340 * s and 90 * s < py < 690 * s:
+            continue
+        img.paste(piece, (px, py), piece)
+
+    d = ImageDraw.Draw(img, "RGBA")
+    ay = 290 * s
+    R = 115 * s
+    d.ellipse((cx - R - 34 * s, ay - R - 34 * s, cx + R + 34 * s, ay + R + 34 * s), fill=(255, 214, 0, 70))
+    d.ellipse((cx - R - 12 * s, ay - R - 12 * s, cx + R + 12 * s, ay + R + 12 * s), fill=GOLD)
+    av = make_circle(snap["src"], 2 * R)
+    img.paste(av, (cx - R, ay - R), av)
+    _crown(d, cx, ay - R - 10 * s, 120 * s)
+
+    d.text((cx, 500 * s), "WINNER", font=get_font(112 * s), fill=GOLD, anchor="mm",
+           stroke_width=6 * s, stroke_fill=(0, 0, 0, 255))
+    d.rounded_rectangle((cx - 290 * s, 560 * s, cx + 290 * s, 660 * s), radius=50 * s,
+                        fill=(20, 20, 24, 240), outline=GOLD, width=4 * s)
+    d.text((cx - 150 * s, 610 * s), "TOTAL WINS", font=get_font(36 * s), fill=WHITE, anchor="mm")
+    d.text((cx + 175 * s, 610 * s), str(snap["wins"]), font=get_font(70 * s), fill=GOLD, anchor="mm")
+
+    others = snap["others"]
+    if others:
+        spacing = 100 * s
+        x0 = cx - (len(others) - 1) * spacing / 2
+        oy = 705 * s
+        r = 32 * s
+        for i, (src, count) in enumerate(others):
+            x = int(x0 + i * spacing)
+            d.ellipse((x - r - 3 * s, oy - r - 3 * s, x + r + 3 * s, oy + r + 3 * s), fill=(255, 255, 255, 235))
+            oav = make_circle(src, 2 * r)
+            img.paste(oav, (x - r, oy - r), oav)
+            _pill(d, (x, oy + r + 2 * s), str(count), (20, 20, 24, 240), WHITE, 22 * s, 52 * s, 26 * s)
+
+    _paste_logo(img, 130 * s, 70 * s, 190 * s)
+    return _to_png(img.resize((WW, WH), Image.Resampling.LANCZOS).convert("RGB"))
+
+
+class WinStore:
+    """Keeps win counts. Saved to a local json file, and also to a Discord channel if
+    STORAGE_CHANNEL_ID is set (so the counts survive Render restarts)."""
+
+    def __init__(self):
+        self.wins = {}
+        self.msg = None
+        self.lock = asyncio.Lock()
+        self.path = os.getenv("WINS_FILE", "wins.json")
+        raw = os.getenv("STORAGE_CHANNEL_ID", "").strip()
+        self.channel_id = int(raw) if raw.isdigit() else 0
+
+    def _load_local(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                self.wins = {int(k): int(v) for k, v in json.load(f).items()}
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.exception("could not read local wins file")
+
+    async def load(self, client):
+        self._load_local()
+        if not self.channel_id:
+            return
+        try:
+            ch = await client.fetch_channel(self.channel_id)
+            async for m in ch.history(limit=100):
+                if m.author.id == client.user.id and m.content == "UNO_WINS_DATA" and m.attachments:
+                    data = json.loads((await m.attachments[0].read()).decode("utf-8"))
+                    self.wins = {int(k): int(v) for k, v in data.items()}
+                    self.msg = m
+                    break
+        except Exception:
+            log.exception("could not load wins from the storage channel")
+
+    async def _save(self):
+        payload = json.dumps({str(k): v for k, v in self.wins.items()}).encode("utf-8")
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(payload.decode("utf-8"))
+        except Exception:
+            log.exception("could not write local wins file")
+        if not self.channel_id:
+            return
+        try:
+            if self.msg is not None:
+                try:
+                    await self.msg.edit(attachments=[discord.File(io.BytesIO(payload), filename="wins.json")])
+                    return
+                except discord.HTTPException:
+                    self.msg = None
+            ch = await bot.fetch_channel(self.channel_id)
+            self.msg = await ch.send(content="UNO_WINS_DATA",
+                                     file=discord.File(io.BytesIO(payload), filename="wins.json"))
+        except Exception:
+            log.exception("could not save wins to the storage channel")
+
+    async def add_win(self, uid):
+        async with self.lock:
+            self.wins[uid] = self.wins.get(uid, 0) + 1
+            n = self.wins[uid]
+            await self._save()
+            return n
+
+
+stats = WinStore()
+
+
+# ======================================================================
 # Game
 # ======================================================================
 games = {}
@@ -569,6 +803,7 @@ class Player:
         self.uno = False
         self.timeouts = 0
         self.avatar = None
+        self.avatar_src = None
 
     @property
     def mention(self):
@@ -577,11 +812,13 @@ class Player:
 
 async def load_avatar(member, index):
     try:
-        data = await member.display_avatar.replace(size=128, format="png").read()
-        return make_circle(Image.open(io.BytesIO(data)), AV_D)
+        data = await member.display_avatar.replace(size=256, format="png").read()
+        src = Image.open(io.BytesIO(data)).convert("RGBA")
+        return make_circle(src, AV_D), src
     except Exception:
         log.warning("avatar load failed", exc_info=True)
-        return fallback_avatar(index)
+        src = _fallback_src(index)
+        return make_circle(src, AV_D), src
 
 
 class UnoGame:
@@ -711,16 +948,12 @@ class UnoGame:
         self.timer = asyncio.create_task(self._timeout(self.turn_token))
 
     # ---------- embeds ----------
-    def lobby_embed(self):
-        names = "\n".join(f"{i + 1}. {p.mention}" for i, p in enumerate(self.players))
-        e = discord.Embed(title="أونو - غرفة الانتظار", color=discord.Color.from_rgb(*RGB["red"]))
-        e.description = (
-            "اضغط على زر الانضمام للدخول إلى اللعبة.\n"
-            f"عدد اللاعبين من {MIN_PLAYERS} إلى {MAX_PLAYERS}.\n"
-            f"المضيف: {self.host.mention}"
-        )
-        e.add_field(name=f"اللاعبون ({len(self.players)})", value=names or "-", inline=False)
-        return e
+    def lobby_snapshot(self, state="open"):
+        srcs = [p.avatar_src if p.avatar_src is not None else _fallback_src(i) for i, p in enumerate(self.players)]
+        return {"srcs": srcs, "max": MAX_PLAYERS, "min": MIN_PLAYERS, "state": state}
+
+    async def lobby_png(self, state="open"):
+        return await asyncio.to_thread(render_lobby, self.lobby_snapshot(state))
 
     # ---------- table ----------
     def snapshot(self, winner=None):
@@ -778,7 +1011,8 @@ class UnoGame:
     async def begin(self):
         async with self.lock:
             for i, p in enumerate(self.players):
-                p.avatar = await load_avatar(p.member, i)
+                if p.avatar is None:
+                    p.avatar, p.avatar_src = await load_avatar(p.member, i)
             self.deck = build_deck()
             for p in self.players:
                 p.hand = [self.deck.pop() for _ in range(START_CARDS)]
@@ -802,16 +1036,31 @@ class UnoGame:
         self._cancel_timer()
         if games.get(self.channel.id) is self:
             games.pop(self.channel.id, None)
+        wins = await stats.add_win(winner.id)
         try:
             png = await asyncio.to_thread(render_table, self.snapshot(winner))
             await self._update_table(png, None)
         except Exception:
             log.exception("final table failed")
-        parts = ["@here"] + lines + [f"الفائز في لعبة أونو هو {winner.mention}. مبروك!"]
-        left = [f"{p.member.display_name} : {len(p.hand)} ورقة" for p in self.players if p.id != winner.id]
-        if left:
-            parts.append("الأوراق المتبقية:\n" + "\n".join(left))
-        await self._send_event("\n".join(parts), replace=False)
+        text = "\n".join(
+            ["@here"] + lines + [f"الفائز في لعبة أونو هو {winner.mention}. هذا فوزه رقم {wins}. مبروك!"]
+        )
+        try:
+            others = [
+                (p.avatar_src if p.avatar_src is not None else _fallback_src(i), len(p.hand))
+                for i, p in enumerate(self.players) if p.id != winner.id
+            ]
+            wsnap = {
+                "src": winner.avatar_src if winner.avatar_src is not None else _fallback_src(0),
+                "wins": wins,
+                "others": others,
+                "seed": winner.id,
+            }
+            wpng = await asyncio.to_thread(render_win, wsnap)
+            await self.channel.send(content=text, file=discord.File(io.BytesIO(wpng), filename="winner.png"))
+        except Exception:
+            log.exception("winner image failed")
+            await self.channel.send(content=text)
 
     async def force_end(self, by):
         async with self.lock:
@@ -1202,6 +1451,11 @@ class LobbyView(BaseView):
         self.game = game
         self.message = None
 
+    async def _show(self, interaction, state="open", view="keep"):
+        png = await self.game.lobby_png(state)
+        file = discord.File(io.BytesIO(png), filename="lobby.png")
+        await interaction.edit_original_response(attachments=[file], view=self if view == "keep" else None)
+
     @discord.ui.button(label="انضمام", style=discord.ButtonStyle.success)
     async def join_btn(self, interaction, button):
         g = self.game
@@ -1214,8 +1468,11 @@ class LobbyView(BaseView):
         if len(g.players) >= MAX_PLAYERS:
             await interaction.response.send_message("اللعبة مكتملة.", ephemeral=True)
             return
-        g.players.append(Player(interaction.user))
-        await interaction.response.edit_message(embed=g.lobby_embed(), view=self)
+        await interaction.response.defer()
+        player = Player(interaction.user)
+        g.players.append(player)
+        player.avatar, player.avatar_src = await load_avatar(interaction.user, len(g.players) - 1)
+        await self._show(interaction)
 
     @discord.ui.button(label="خروج", style=discord.ButtonStyle.secondary)
     async def leave_btn(self, interaction, button):
@@ -1227,8 +1484,9 @@ class LobbyView(BaseView):
         if interaction.user.id == g.host.id:
             await interaction.response.send_message("المضيف يستطيع إلغاء اللعبة بزر الإلغاء.", ephemeral=True)
             return
+        await interaction.response.defer()
         g.players.remove(p)
-        await interaction.response.edit_message(embed=g.lobby_embed(), view=self)
+        await self._show(interaction)
 
     @discord.ui.button(label="ابدأ", style=discord.ButtonStyle.primary)
     async def start_btn(self, interaction, button):
@@ -1244,7 +1502,8 @@ class LobbyView(BaseView):
             return
         g.started = True
         self.stop()
-        await interaction.response.edit_message(embed=g.lobby_embed(), view=None)
+        await interaction.response.defer()
+        await self._show(interaction, "starting", None)
         await g.begin()
 
     @discord.ui.button(label="إلغاء", style=discord.ButtonStyle.danger)
@@ -1258,20 +1517,25 @@ class LobbyView(BaseView):
             return
         if games.get(g.channel.id) is g:
             games.pop(g.channel.id, None)
+        g.ended = True
         self.stop()
-        e = discord.Embed(title="أونو", description="تم إلغاء اللعبة.", color=discord.Color.dark_grey())
-        await interaction.response.edit_message(embed=e, view=None)
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            content="تم إلغاء اللعبة.", view=None, allowed_mentions=discord.AllowedMentions.none()
+        )
 
     async def on_timeout(self):
         g = self.game
-        if g.started:
+        if g.started or g.ended:
             return
         if games.get(g.channel.id) is g:
             games.pop(g.channel.id, None)
+        g.ended = True
         if self.message:
-            e = discord.Embed(title="أونو", description="انتهت مهلة غرفة الانتظار.", color=discord.Color.dark_grey())
             try:
-                await self.message.edit(embed=e, view=None)
+                await self.message.edit(
+                    content="انتهت مهلة غرفة الانتظار.", view=None, allowed_mentions=discord.AllowedMentions.none()
+                )
             except discord.HTTPException:
                 pass
 
@@ -1302,11 +1566,21 @@ async def start_game(message):
         await message.reply("توجد لعبة أونو جارية في هذا الروم بالفعل.", delete_after=10)
         return
     game = UnoGame(channel, message.author)
-    game.players.append(Player(message.author))
     games[channel.id] = game
-    view = LobbyView(game)
-    game.lobby_view = view
-    view.message = await channel.send(content="@here", embed=game.lobby_embed(), view=view)
+    try:
+        host = Player(message.author)
+        host.avatar, host.avatar_src = await load_avatar(message.author, 0)
+        game.players.append(host)
+        png = await game.lobby_png()
+        view = LobbyView(game)
+        game.lobby_view = view
+        view.message = await channel.send(
+            content="@here", file=discord.File(io.BytesIO(png), filename="lobby.png"), view=view
+        )
+    except Exception:
+        games.pop(channel.id, None)
+        log.exception("could not open the lobby")
+        await channel.send("تعذر فتح غرفة الانتظار، حاول مرة أخرى.", delete_after=10)
 
 
 async def stop_game(message):
@@ -1326,9 +1600,10 @@ async def stop_game(message):
     if game.lobby_view:
         game.lobby_view.stop()
         if game.lobby_view.message:
-            e = discord.Embed(title="أونو", description="تم إلغاء اللعبة.", color=discord.Color.dark_grey())
             try:
-                await game.lobby_view.message.edit(embed=e, view=None)
+                await game.lobby_view.message.edit(
+                    content="تم إلغاء اللعبة.", view=None, allowed_mentions=discord.AllowedMentions.none()
+                )
             except discord.HTTPException:
                 pass
     await channel.send(f"{message.author.mention} ألغى اللعبة.")
@@ -1356,6 +1631,7 @@ class UnoBot(commands.Bot):
 
     async def setup_hook(self):
         await asyncio.to_thread(prerender)
+        await stats.load(self)
         await start_web()
 
     async def on_ready(self):
