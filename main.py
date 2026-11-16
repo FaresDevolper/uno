@@ -1682,7 +1682,7 @@ class UnoBot(commands.Bot):
         text = norm(message.content)
         is_command = text in ALL_WORDS
         in_uno_room = message.channel.id in UNO_CHANNEL_IDS
-        if in_uno_room and (is_command or not can_stop(message.author)):
+        if in_uno_room and not is_command and not can_stop(message.author):
             schedule_delete(message)
         if not is_command:
             return
