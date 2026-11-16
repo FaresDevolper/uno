@@ -39,6 +39,14 @@ STOP_ROLE_IDS = _parse_ids("" + "," + os.getenv("STOP_ROLE_IDS", "15511495196750
 STOP_USER_IDS = _parse_ids("" + "," + os.getenv("STOP_USER_IDS", "912349519990095892"))
 
 
+# Dedicated Uno room(s): in these rooms every message that is not an Uno command is
+# deleted after CLEAN_DELAY seconds (members who can stop a game are exempt).
+# Put the room ID between the first quotes, or set UNO_CHANNEL_ID in Render.
+# In every other room nothing is ever deleted.
+UNO_CHANNEL_IDS = _parse_ids("" + "," + os.getenv("UNO_CHANNEL_ID", "1571858833062760478"))
+CLEAN_DELAY = 2
+
+
 def can_stop(member):
     if member.id in STOP_USER_IDS:
         return True
@@ -56,6 +64,7 @@ START_WORDS = {"اونو", "uno"}
 STOP_WORDS = {"ايقاف اونو", "stop uno", "uno stop"}
 LEAVE_WORDS = {"انسحاب", "انسحاب اونو", "leave uno"}
 RULES_WORDS = {"قوانين اونو", "uno rules"}
+ALL_WORDS = START_WORDS | STOP_WORDS | LEAVE_WORDS | RULES_WORDS
 
 COLOR_KEYS = ["red", "yellow", "green", "blue"]
 COLOR_AR = {"red": "الأحمر", "yellow": "الأصفر", "green": "الأخضر", "blue": "الأزرق"}
@@ -1560,10 +1569,40 @@ def rules_embed():
     return e
 
 
+_bg_tasks = set()
+
+
+async def _delete_later(message, delay):
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except discord.NotFound:
+        pass
+    except discord.Forbidden:
+        log.warning("Missing Manage Messages permission in channel %s", message.channel.id)
+    except discord.HTTPException:
+        pass
+
+
+def schedule_delete(message, delay=CLEAN_DELAY):
+    task = asyncio.create_task(_delete_later(message, delay))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+async def say(message, text=None, **kwargs):
+    """Reply to a command. In the Uno room the command message is deleted, so the bot
+    sends a normal message with a mention instead of a reply."""
+    if message.channel.id in UNO_CHANNEL_IDS:
+        content = f"{message.author.mention} {text}" if text else None
+        return await message.channel.send(content=content, **kwargs)
+    return await message.reply(text, **kwargs)
+
+
 async def start_game(message):
     channel = message.channel
     if channel.id in games:
-        await message.reply("توجد لعبة أونو جارية في هذا الروم بالفعل.", delete_after=10)
+        await say(message, "توجد لعبة أونو جارية في هذا الروم بالفعل.", delete_after=10)
         return
     game = UnoGame(channel, message.author)
     games[channel.id] = game
@@ -1587,10 +1626,10 @@ async def stop_game(message):
     channel = message.channel
     game = games.get(channel.id)
     if game is None:
-        await message.reply("لا توجد لعبة جارية في هذا الروم.", delete_after=10)
+        await say(message, "لا توجد لعبة جارية في هذا الروم.", delete_after=10)
         return
     if not can_stop(message.author):
-        await message.reply("لا تملك صلاحية إيقاف اللعبة.", delete_after=10)
+        await say(message, "لا تملك صلاحية إيقاف اللعبة.", delete_after=10)
         return
     if game.started:
         await game.force_end(message.author)
@@ -1612,11 +1651,11 @@ async def stop_game(message):
 async def leave_game(message):
     game = games.get(message.channel.id)
     if game is None or not game.started:
-        await message.reply("لا توجد لعبة جارية في هذا الروم.", delete_after=10)
+        await say(message, "لا توجد لعبة جارية في هذا الروم.", delete_after=10)
         return
     err = await game.leave(message.author.id)
     if err:
-        await message.reply(err, delete_after=10)
+        await say(message, err, delete_after=10)
 
 
 class UnoBot(commands.Bot):
@@ -1641,7 +1680,11 @@ class UnoBot(commands.Bot):
         if message.author.bot or message.guild is None:
             return
         text = norm(message.content)
-        if not text:
+        is_command = text in ALL_WORDS
+        in_uno_room = message.channel.id in UNO_CHANNEL_IDS
+        if in_uno_room and (is_command or not can_stop(message.author)):
+            schedule_delete(message)
+        if not is_command:
             return
         try:
             if text in START_WORDS:
@@ -1651,33 +1694,6 @@ class UnoBot(commands.Bot):
             elif text in LEAVE_WORDS:
                 await leave_game(message)
             elif text in RULES_WORDS:
-                await message.reply(embed=rules_embed())
+                await say(message, None, embed=rules_embed(), delete_after=120 if in_uno_room else None)
         except Exception:
-            log.exception("message handler failed")
-
-
-bot = UnoBot()
-
-
-async def start_web():
-    app = web.Application()
-
-    async def index(request):
-        return web.Response(text="OK")
-
-    app.router.add_get("/", index)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080")))
-    await site.start()
-
-
-def main():
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        raise SystemExit("DISCORD_TOKEN environment variable is missing")
-    bot.run(token, log_handler=None)
-
-
-if __name__ == "__main__":
-    main()
+            log.exception("message handler
