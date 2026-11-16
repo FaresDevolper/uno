@@ -18,9 +18,9 @@ log = logging.getLogger("uno")
 # ======================================================================
 # Settings
 # ======================================================================
-TURN_SECONDS = 60
+TURN_SECONDS = 15
 MAX_TIMEOUTS = 2
-LOBBY_SECONDS = 300
+LOBBY_SECONDS = 100
 MIN_PLAYERS = 2
 MAX_PLAYERS = 10
 KEEP_EVENT_HISTORY = False  # False: only the latest action message stays under the table
