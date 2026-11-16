@@ -1686,7 +1686,7 @@ class UnoBot(commands.Bot):
             schedule_delete(message)
         if not is_command:
             return
-        try:
+                try:
             if text in START_WORDS:
                 await start_game(message)
             elif text in STOP_WORDS:
@@ -1697,10 +1697,35 @@ class UnoBot(commands.Bot):
                 await say(message, None, embed=rules_embed(), delete_after=120 if in_uno_room else None)
         except Exception:
             log.exception("message handler error")
-             import os
-from aiohttp import web
-async def _health(request): return web.Response(text="ok")
-async def start_web(): app = web.Application(); app.router.add_get("/", _health); runner = web.AppRunner(app); await runner.setup(); await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000"))).start()
-_cls = next(c for c in list(globals().values()) if isinstance(c, type) and issubclass(c, discord.Client) and c.__module__ == __name__)
-_token = os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN") or os.environ.get("BOT_TOKEN") or os.environ.get("DISCORD_BOT_TOKEN")
-_cls().run(_token)
+
+
+# ======================================================================
+# Web server (keeps Render alive) and run
+# ======================================================================
+async def _health(request):
+    return web.Response(text="ok")
+
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", _health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000")))
+    await site.start()
+
+
+def main():
+    token = (
+        os.environ.get("DISCORD_TOKEN")
+        or os.environ.get("TOKEN")
+        or os.environ.get("BOT_TOKEN")
+        or os.environ.get("DISCORD_BOT_TOKEN")
+    )
+    if not token:
+        raise SystemExit("No Discord token found in environment variables.")
+    UnoBot().run(token)
+
+
+if __name__ == "__main__":
+    main()
