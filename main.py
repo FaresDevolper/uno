@@ -1696,4 +1696,4 @@ class UnoBot(commands.Bot):
             elif text in RULES_WORDS:
                 await say(message, None, embed=rules_embed(), delete_after=120 if in_uno_room else None)
         except Exception:
-            log.exception("message handler
+            log.exception("message handler error")
