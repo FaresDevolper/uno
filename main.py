@@ -40,7 +40,7 @@ STOP_USER_IDS = _parse_ids("" + "," + os.getenv("STOP_USER_IDS", "91234951999009
 
 
 # Dedicated Uno room(s): in these rooms every message that is not an Uno command is
-# deleted after CLEAN_DELAY seconds (members who can stop a game are exempt).
+# deleted after CLEAN_DELAY seconds (for everyone, including admins).
 # Put the room ID between the first quotes, or set UNO_CHANNEL_ID in Render.
 # In every other room nothing is ever deleted.
 UNO_CHANNEL_IDS = _parse_ids("" + "," + os.getenv("UNO_CHANNEL_ID", "1571858833062760478"))
@@ -1682,7 +1682,7 @@ class UnoBot(commands.Bot):
         text = norm(message.content)
         is_command = text in ALL_WORDS
         in_uno_room = message.channel.id in UNO_CHANNEL_IDS
-        if in_uno_room and not is_command and not can_stop(message.author):
+        if in_uno_room and not is_command:
             schedule_delete(message)
         if not is_command:
             return
