@@ -1697,9 +1697,7 @@ class UnoBot(commands.Bot):
                 await say(message, None, embed=rules_embed(), delete_after=120 if in_uno_room else None)
         except Exception:
             log.exception("message handler error")
-            if __name__ == "__main__":
-    import os
-    _cls = next(c for c in list(globals().values()) if isinstance(c, type) and issubclass(c, discord.Client) and c.__module__ == __name__)
-    _token = os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN") or os.environ.get("BOT_TOKEN") or os.environ.get("DISCORD_BOT_TOKEN")
-    _cls().run(_token)
-            
+            import os
+_cls = next(c for c in list(globals().values()) if isinstance(c, type) and issubclass(c, discord.Client) and c.__module__ == __name__)
+_token = os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN") or os.environ.get("BOT_TOKEN") or os.environ.get("DISCORD_BOT_TOKEN")
+_cls().run(_token)
