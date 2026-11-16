@@ -1686,7 +1686,7 @@ class UnoBot(commands.Bot):
             schedule_delete(message)
         if not is_command:
             return
-                try:
+        try:
             if text in START_WORDS:
                 await start_game(message)
             elif text in STOP_WORDS:
