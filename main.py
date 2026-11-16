@@ -1697,7 +1697,10 @@ class UnoBot(commands.Bot):
                 await say(message, None, embed=rules_embed(), delete_after=120 if in_uno_room else None)
         except Exception:
             log.exception("message handler error")
-            import os
+             import os
+from aiohttp import web
+async def _health(request): return web.Response(text="ok")
+async def start_web(): app = web.Application(); app.router.add_get("/", _health); runner = web.AppRunner(app); await runner.setup(); await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", "10000"))).start()
 _cls = next(c for c in list(globals().values()) if isinstance(c, type) and issubclass(c, discord.Client) and c.__module__ == __name__)
 _token = os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN") or os.environ.get("BOT_TOKEN") or os.environ.get("DISCORD_BOT_TOKEN")
 _cls().run(_token)
